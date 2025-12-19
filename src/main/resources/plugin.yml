@@ -6,13 +6,9 @@ authors: ["ShoreCrash"]
 description: Crash mini-game with hologram chart and betting.
 commands:
   crash:
-    description: Place a crash bet before the round starts.
-    usage: /crash <amount>
+    description: Place a crash bet or cash out during a round.
+    usage: /crash <amount|cashout|cancel|stats [player]>
     aliases: [crashbet, bet]
-  crashcashout:
-    description: Cash out your active crash bet.
-    usage: /crashcashout
-    aliases: [cashout]
   crashholo:
     description: Manage the crash hologram location.
     usage: /crashholo set|clear
@@ -22,13 +18,16 @@ commands:
     usage: /crashreload
   crashadmin:
     description: Admin utilities for ShoreCrash.
-    usage: /crashadmin rig <multiplier>
+    usage: /crashadmin rig <multiplier>|summary
 permissions:
   shorecrash.bet:
     description: Allow players to place crash bets.
     default: true
   shorecrash.cashout:
     description: Allow players to cash out during a round.
+    default: true
+  shorecrash.stats:
+    description: Allow players to view stats.
     default: true
   shorecrash.admin:
     description: Allow staff to manage hologram and reload configuration.

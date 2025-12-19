@@ -1,18 +1,27 @@
 package com.shorecrash.game;
 
 import com.shorecrash.config.CrashConfig;
+import com.shorecrash.data.CrashDataStore;
 import com.shorecrash.economy.EconomyService;
 import com.shorecrash.holo.HologramManager;
+import com.shorecrash.stats.StatsService;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.World;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.util.Transformation;
+import org.bukkit.util.Vector;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -35,9 +44,12 @@ public class CrashGame {
     private final CrashConfig config;
     private final HologramManager hologram;
     private final EconomyService economy;
+    private final StatsService stats;
+    private final CrashDataStore crashData;
     private final Random random = new Random();
     private final ArrayDeque<Double> multiplierHistory = new ArrayDeque<>();
     private final List<ItemDisplay> graphBlocks = new ArrayList<>();
+    private final Map<UUID, Long> actionCooldown = new HashMap<>();
     private double lastPlottedMultiplier = 0.0;
     private long lastGraphSpawnAt = 0L;
     private long lastHologramPushAt = 0L;
@@ -53,11 +65,13 @@ public class CrashGame {
     private double currentMultiplier;
     private Location graphBase;
 
-    public CrashGame(JavaPlugin plugin, CrashConfig config, HologramManager hologram, EconomyService economy) {
+    public CrashGame(JavaPlugin plugin, CrashConfig config, HologramManager hologram, EconomyService economy, StatsService stats, CrashDataStore crashData) {
         this.plugin = plugin;
         this.config = config;
         this.hologram = hologram;
         this.economy = economy;
+        this.stats = stats;
+        this.crashData = crashData;
     }
 
     public CrashConfig getConfigModel() {
@@ -79,6 +93,9 @@ public class CrashGame {
             }
         };
         task.runTaskTimer(plugin, 1L, config.game().getTickInterval());
+
+        // Spawn hologram immediately so it exists even before the first tick, e.g., after reboot
+        refreshHologramNow();
     }
 
     public void stop() {
@@ -107,6 +124,11 @@ public class CrashGame {
             lastHologramPushAt = now;
         }
         updateGraphBlocks();
+    }
+
+    public void refreshHologramNow() {
+        pushHologram(System.currentTimeMillis());
+        lastHologramPushAt = System.currentTimeMillis();
     }
 
     private void handleWaiting(long now) {
@@ -159,6 +181,7 @@ public class CrashGame {
             String text = config.tnt().getText().replace("{multiplier}", formatMultiplier(crashMultiplier));
             hologram.spawnCrashMarker(markerLoc, text, config.tnt().getLifespanSeconds());
         }
+        recordCrashResult(crashMultiplier);
     }
 
     private void resetToWaiting(long now) {
@@ -200,35 +223,58 @@ public class CrashGame {
     }
 
     public boolean placeBet(Player player, double amount) {
+        if (isRateLimited(player)) {
+            return false;
+        }
         if (state != State.WAITING && !config.game().isAllowLateJoin()) {
             send(player, config.messages().notWaiting());
             return false;
         }
-        if (amount < config.game().getMinBet()) {
+
+        Bet existing = bets.get(player.getUniqueId());
+        double baseAmount = existing != null ? existing.getAmount() : 0.0;
+        boolean stackingWhileWaiting = state == State.WAITING && existing != null;
+
+        if (!stackingWhileWaiting && amount < config.game().getMinBet()) {
             send(player, config.messages().betTooLow().replace("{min}", formatMoney(config.game().getMinBet())));
             return false;
         }
-        if (amount > config.game().getMaxBet()) {
+
+        double targetAmount = stackingWhileWaiting ? baseAmount + amount : amount;
+        if (targetAmount > config.game().getMaxBet()) {
             send(player, config.messages().betTooHigh().replace("{max}", formatMoney(config.game().getMaxBet())));
             return false;
         }
-        if (economy.isEnabled() && !economy.withdraw(player, amount)) {
+
+        if (existing != null && state != State.WAITING && targetAmount < baseAmount) {
+            send(player, config.messages().notWaiting());
+            return false; // avoid mid-round bet reductions when late-join is enabled
+        }
+
+        double delta = targetAmount - baseAmount;
+        if (economy.isEnabled() && delta > 0 && !economy.withdraw(player, delta)) {
             send(player, config.messages().insufficientFunds());
             return false;
         }
-        Bet bet = bets.get(player.getUniqueId());
-        if (bet == null) {
-            bet = new Bet(player.getUniqueId(), player.getName(), amount);
+        if (economy.isEnabled() && delta < 0 && state == State.WAITING) {
+            economy.deposit(player, -delta); // refund if the target bet is lower during the waiting phase
+        }
+
+        if (existing == null) {
+            Bet bet = new Bet(player.getUniqueId(), player.getName(), targetAmount);
             bets.put(player.getUniqueId(), bet);
-            send(player, config.messages().betPlaced().replace("{amount}", formatMoney(amount)));
+            send(player, config.messages().betPlaced().replace("{amount}", formatMoney(targetAmount)));
         } else {
-            bet.setAmount(amount);
-            send(player, config.messages().betUpdated().replace("{amount}", formatMoney(amount)));
+            existing.setAmount(targetAmount);
+            send(player, config.messages().betUpdated().replace("{amount}", formatMoney(targetAmount)));
         }
         return true;
     }
 
     public void cancelBet(Player player) {
+        if (isRateLimited(player)) {
+            return;
+        }
         Bet bet = bets.get(player.getUniqueId());
         if (bet == null || bet.getStatus() != Bet.Status.ACTIVE) {
             send(player, config.messages().noBet());
@@ -246,7 +292,30 @@ public class CrashGame {
         send(player, config.messages().betCancelled().replace("{amount}", formatMoney(amount)));
     }
 
+    public void handleQuit(Player player) {
+        Bet bet = bets.get(player.getUniqueId());
+        if (bet == null) {
+            return;
+        }
+
+        if (state == State.WAITING) {
+            // Safe to refund while waiting to avoid locking wagers
+            bets.remove(player.getUniqueId());
+            if (economy.isEnabled()) {
+                economy.deposit(player, bet.getAmount());
+            }
+            return;
+        }
+
+        if (state == State.RUNNING && bet.getStatus() == Bet.Status.ACTIVE) {
+            markLostSilently(bet);
+        }
+    }
+
     public void cashout(Player player) {
+        if (isRateLimited(player)) {
+            return;
+        }
         if (state != State.RUNNING) {
             send(player, config.messages().notRunning());
             return;
@@ -261,6 +330,7 @@ public class CrashGame {
         double finalPayout = payout - houseEdge;
         bet.markCashed(currentMultiplier, finalPayout);
         economy.deposit(player, finalPayout);
+        stats.recordCashout(player.getUniqueId(), bet.getAmount(), finalPayout);
         // House edge: keep 1% rake; nothing else to do since we withheld it from payout
         send(player, config.messages().cashoutSuccess()
             .replace("{payout}", formatMoney(finalPayout))
@@ -274,6 +344,7 @@ public class CrashGame {
     private void markLostWithMessage(Bet bet) {
         bet.markLost();
         Player player = Bukkit.getPlayer(bet.getPlayerId());
+        stats.recordLoss(bet.getPlayerId(), bet.getAmount());
         if (player == null) {
             return;
         }
@@ -282,18 +353,28 @@ public class CrashGame {
                 .replace("{multiplier}", formatMultiplier(crashMultiplier)));
     }
 
+    private void markLostSilently(Bet bet) {
+        bet.markLost();
+        stats.recordLoss(bet.getPlayerId(), bet.getAmount());
+    }
+
     private void updateGraphBlocks() {
         if (state != State.RUNNING) {
             lastGraphSpawnAt = 0L;
             return;
         }
         if (graphBase == null || graphBase.getWorld() == null) {
-            return;
+            graphBase = computeGraphBase();
+            if (graphBase == null || graphBase.getWorld() == null) {
+                clearGraphBlocks();
+                return;
+            }
         }
+        Vector axis = graphAxis(graphBase);
         int width = Math.max(4, config.hologram().getChartWidth());
-        double spacing = 0.12; // tighter spacing to reduce horizontal travel
+        double spacing = 0.10; // slightly tighter spacing for smoother travel
         long now = System.currentTimeMillis();
-        final long spawnIntervalMs = 400L; // constant speed regardless of multiplier
+        final long spawnIntervalMs = 250L; // faster updates for smoother motion
 
         if (lastGraphSpawnAt != 0L && now - lastGraphSpawnAt < spawnIntervalMs) {
             return; // wait for next tick to spawn
@@ -301,21 +382,34 @@ public class CrashGame {
 
         World world = graphBase.getWorld();
 
-        int resetLimit = Math.max(2, width - 2); // reset a bit before full width
-        if (graphBlocks.size() >= resetLimit) {
+        if (graphBlocks.size() >= width) {
             clearGraphBlocks();
         }
 
         // Keep Y growth simple and unrelated to crash progress to avoid predictability
-        double yOffset = 0.10 + (graphBlocks.size() * 0.06);
-        Location loc = graphBase.clone().add(graphBlocks.size() * spacing, yOffset, 0);
+        double yOffset = 0.10 + (graphBlocks.size() * 0.05);
+        Location loc = graphBase.clone()
+            .add(axis.clone().multiply(graphBlocks.size() * spacing))
+            .add(0, yOffset, 0);
 
         ItemDisplay display = (ItemDisplay) world.spawnEntity(loc, EntityType.ITEM_DISPLAY);
         display.setItemStack(new ItemStack(Material.EMERALD_BLOCK));
         display.setTransformation(smallTransform());
         display.setBillboard(ItemDisplay.Billboard.FIXED);
+        display.setRotation(graphBase.getYaw(), 0f);
         display.setPersistent(false);
         graphBlocks.add(display);
+
+        // Re-align all blocks to their index to avoid visible jumps when pruning
+        for (int i = 0; i < graphBlocks.size(); i++) {
+            ItemDisplay block = graphBlocks.get(i);
+            double offsetY = 0.10 + (i * 0.05);
+            Location target = graphBase.clone()
+                    .add(axis.clone().multiply(i * spacing))
+                    .add(0, offsetY, 0);
+            block.teleport(target);
+            block.setRotation(graphBase.getYaw(), 0f);
+        }
 
         lastPlottedMultiplier = currentMultiplier;
         lastGraphSpawnAt = now;
@@ -337,14 +431,16 @@ public class CrashGame {
 
     private Location computeGraphBase() {
         Location base = config.hologram().getLocation();
-        if (base == null) {
+        if (base == null || base.getWorld() == null) {
             return null;
         }
         double spacing = config.hologram().getLineSpacing();
         int lineCount = Math.max(0, config.hologram().getLines().size());
         double drop = spacing * (lineCount + 4); // raise the graph closer to the hologram text
-        // shift further left to start well left under the text block
-        return base.clone().add(-1.5, -drop, 0);
+        Vector axis = graphAxis(base);
+        Location start = base.clone().add(axis.clone().multiply(-1.5)).add(0, -drop, 0);
+        start.setYaw(base.getYaw());
+        return start;
     }
 
     private void clearGraphBlocks() {
@@ -352,18 +448,22 @@ public class CrashGame {
         graphBlocks.clear();
     }
 
+    private Vector graphAxis(Location base) {
+        double yawRad = Math.toRadians(base.getYaw());
+        // Use the player's facing to rotate the horizontal axis so the emerald graph aligns with the hologram
+        return new Vector(-Math.cos(yawRad), 0, -Math.sin(yawRad));
+    }
+
     private void pushHologram(long now) {
         List<String> templates = config.hologram().getLines();
         List<String> rendered = new ArrayList<>(templates.size());
         for (String line : templates) {
-            if (state == State.RUNNING && line.contains("{timer}")) {
-                continue; // hide next-round timer while game is active
-            }
             String out = line
                     .replace("{state}", stateText())
-                    .replace("{timer}", String.valueOf(Math.max(0, (nextStartAt - now) / 1000)))
+                    .replace("{timer}", state == State.RUNNING ? "" : String.valueOf(Math.max(0, (nextStartAt - now) / 1000)))
                     .replace("{multiplier}", formatMultiplier(currentMultiplier))
                     .replace("{pot}", formatMoneyShort(potTotal()))
+                    .replace("{players_total}", String.valueOf(activePlayerCount()))
                     .replace("{players}", renderPlayers());
 
             if (out.contains("{chart}")) {
@@ -395,15 +495,42 @@ public class CrashGame {
                 .sum();
     }
 
+    private int activePlayerCount() {
+        return (int) bets.values().stream()
+                .filter(b -> b.getStatus() == Bet.Status.ACTIVE)
+                .count();
+    }
+
     private String renderPlayers() {
-        if (bets.isEmpty()) {
+        List<Bet> visible = bets.values().stream()
+                .filter(b -> b.getStatus() == Bet.Status.ACTIVE || b.getStatus() == Bet.Status.CASHED_OUT)
+                .sorted((a, b) -> Integer.compare(statusRank(a.getStatus()), statusRank(b.getStatus())))
+                .limit(3)
+                .collect(Collectors.toList());
+
+        if (visible.isEmpty()) {
             return "None";
         }
-        return bets.values().stream()
-            .filter(b -> b.getStatus() == Bet.Status.ACTIVE)
-            .limit(3)
-            .map(b -> b.getPlayerName() + "(" + formatMoneyShort(b.getAmount()) + ChatColor.RESET + ")")
-            .collect(Collectors.joining(", "));
+
+        return visible.stream()
+                .map(this::formatBetEntry)
+                .collect(Collectors.joining(", "));
+    }
+
+    private int statusRank(Bet.Status status) {
+        return switch (status) {
+            case ACTIVE -> 0;
+            case CASHED_OUT -> 1;
+            case LOST -> 2;
+        };
+    }
+
+    private String formatBetEntry(Bet bet) {
+        return switch (bet.getStatus()) {
+            case ACTIVE -> bet.getPlayerName() + "(" + formatMoneyShort(bet.getAmount()) + ChatColor.RESET + ")";
+            case CASHED_OUT -> ChatColor.GRAY + bet.getPlayerName() + " @ " + ChatColor.GREEN + formatMultiplier(bet.getCashoutMultiplier()) + "x" + ChatColor.RESET;
+            case LOST -> bet.getPlayerName();
+        };
     }
 
     private List<String> buildChartLines() {
@@ -427,12 +554,185 @@ public class CrashGame {
         multiplierHistory.addLast(sample);
     }
 
+    private void recordCrashResult(double result) {
+        crashData.record(result);
+    }
+
+    public void sendLastGames(Player player) {
+        List<Double> recent = crashData.recent(Math.max(1, config.game().getLastGamesDisplayCount()));
+        if (recent.isEmpty()) {
+            player.sendMessage(ChatColor.YELLOW + "No previous games yet.");
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(ChatColor.GRAY).append("Last games: ");
+        for (int i = 0; i < recent.size(); i++) {
+            double val = recent.get(i);
+            ChatColor color = colorForMultiplier(val);
+            sb.append(color).append(formatMultiplier(val)).append("x");
+            if (i < recent.size() - 1) {
+                sb.append(ChatColor.GRAY).append(" | ");
+            }
+        }
+        player.sendMessage(sb.toString());
+    }
+
+    private ChatColor colorForMultiplier(double m) {
+        if (m < 1.25) {
+            return ChatColor.RED;
+        }
+        if (m < 2.0) {
+            return ChatColor.YELLOW;
+        }
+        if (m <= 5.0) {
+            return ChatColor.GREEN;
+        }
+        return ChatColor.AQUA;
+    }
+
+    private boolean isRateLimited(Player player) {
+        long now = System.currentTimeMillis();
+        Long last = actionCooldown.get(player.getUniqueId());
+        long cooldown = Math.max(0L, config.game().getActionRateLimitMs());
+        if (last != null && now - last < cooldown) {
+            return true;
+        }
+        actionCooldown.put(player.getUniqueId(), now);
+        return false;
+    }
+
+    public void openPlayerStatsGui(Player viewer, String targetName) {
+        OfflinePlayer target = Bukkit.getOfflinePlayer(targetName);
+        String displayName = target.getName() == null ? targetName : target.getName();
+        Inventory inv = buildStatsInventory(displayName, stats.get(target.getUniqueId()));
+        viewer.openInventory(inv);
+    }
+
+    public void openServerSummaryGui(Player viewer) {
+        Inventory inv = buildStatsInventory("Server", stats.getTotals());
+        viewer.openInventory(inv);
+    }
+
+    private Inventory buildStatsInventory(String playerName, StatsService.PlayerStats data) {
+        CrashConfig.StatsBookSettings cfg = config.statsBook();
+        int size = 27; // 3 rows for centered display
+        InventoryHolder holder = new com.shorecrash.stats.StatsInventoryHolder(playerName);
+        Inventory inv = Bukkit.createInventory(holder, size, color(cfg.getName().replace("%player%", playerName)));
+
+        // fill background
+        ItemStack filler = new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
+        ItemMeta fMeta = filler.getItemMeta();
+        if (fMeta != null) {
+            fMeta.setDisplayName(" ");
+            filler.setItemMeta(fMeta);
+        }
+        for (int i = 0; i < size; i++) {
+            inv.setItem(i, filler);
+        }
+
+        ItemStack statsItem = buildStatsItem(playerName, data);
+        inv.setItem(13, statsItem); // center slot
+        return inv;
+    }
+
+    private ItemStack buildStatsItem(String playerName, StatsService.PlayerStats data) {
+        CrashConfig.StatsBookSettings cfg = config.statsBook();
+        ItemStack item = new ItemStack(cfg.getMaterial() == null ? Material.WRITABLE_BOOK : cfg.getMaterial());
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) {
+            return item;
+        }
+
+        meta.setDisplayName(color(cfg.getName().replace("%player%", playerName)));
+        List<String> lore = cfg.getLore().stream()
+                .map(line -> replaceStatsPlaceholders(line, playerName, data))
+                .map(this::color)
+                .collect(Collectors.toList());
+        meta.setLore(lore);
+
+        if (cfg.isGlow()) {
+            meta.addEnchant(Enchantment.LUCK_OF_THE_SEA, 1, true); // harmless glow trigger
+            meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+        }
+
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private String replaceStatsPlaceholders(String line, String playerName, StatsService.PlayerStats data) {
+        long wins = data.getWins();
+        long losses = data.getLosses();
+        long totalGames = data.getTotalGames();
+        double winRate = totalGames > 0 ? (wins * 100.0 / totalGames) : 0.0;
+
+        return line
+                .replace("%player%", playerName)
+                .replace("%wins%", String.valueOf(wins))
+                .replace("%losses%", String.valueOf(losses))
+                .replace("%total_games%", String.valueOf(totalGames))
+                .replace("%win_rate%", String.format("%.2f%%", winRate))
+                .replace("%net%", formatMoneyCompact(data.getNet()))
+                .replace("%profit%", formatMoneyCompact(data.getProfit()))
+                .replace("%loss%", formatMoneyCompact(data.getLoss()))
+                .replace("%total_bet%", formatMoneyCompact(data.getTotalBet()))
+                .replace("%total_won%", formatMoneyCompact(data.getTotalWon()));
+    }
+
+    private String color(String input) {
+        if (input == null) {
+            return "";
+        }
+        return ChatColor.translateAlternateColorCodes('&', translateHexColors(input));
+    }
+
+    private String translateHexColors(String message) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < message.length(); i++) {
+            char c = message.charAt(i);
+            if (c == '&' && i + 7 < message.length() && message.charAt(i + 1) == '#') {
+                String hex = message.substring(i + 2, i + 8);
+                if (hex.matches("[0-9A-Fa-f]{6}")) {
+                    sb.append('§').append('x');
+                    for (char h : hex.toCharArray()) {
+                        sb.append('§').append(Character.toLowerCase(h));
+                    }
+                    i += 7;
+                    continue;
+                }
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
     private String formatMultiplier(double value) {
         return String.format("%.2f", value);
     }
 
     private String formatMoney(double value) {
         return config.moneyFormat().format(value);
+    }
+
+    private String formatMoneyCompact(double value) {
+        double abs = Math.abs(value);
+        String suffix = "";
+        double scaled = value;
+        if (abs >= 1_000_000_000) {
+            suffix = "b";
+            scaled = value / 1_000_000_000d;
+        } else if (abs >= 1_000_000) {
+            suffix = "m";
+            scaled = value / 1_000_000d;
+        } else if (abs >= 1_000) {
+            suffix = "k";
+            scaled = value / 1_000d;
+        }
+        String formatted = String.format("%.2f", scaled);
+        if (formatted.endsWith(".00")) {
+            formatted = formatted.substring(0, formatted.length() - 3);
+        }
+        return formatted + suffix;
     }
 
     private String formatMoneyShort(double value) {

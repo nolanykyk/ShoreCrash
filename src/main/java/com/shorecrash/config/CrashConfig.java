@@ -3,6 +3,7 @@ package com.shorecrash.config;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -19,13 +20,15 @@ public class CrashConfig {
     private final HologramSettings hologram;
     private final TntHologramSettings tnt;
     private final Messages messages;
+    private final StatsBookSettings statsBook;
     private final DecimalFormat moneyFormat;
 
-    public CrashConfig(GameSettings game, HologramSettings hologram, TntHologramSettings tnt, Messages messages, DecimalFormat moneyFormat) {
+    public CrashConfig(GameSettings game, HologramSettings hologram, TntHologramSettings tnt, Messages messages, StatsBookSettings statsBook, DecimalFormat moneyFormat) {
         this.game = game;
         this.hologram = hologram;
         this.tnt = tnt;
         this.messages = messages;
+        this.statsBook = statsBook;
         this.moneyFormat = moneyFormat;
     }
 
@@ -40,10 +43,11 @@ public class CrashConfig {
         HologramSettings holo = new HologramSettings(cfg.getConfigurationSection("hologram"));
         TntHologramSettings tnt = new TntHologramSettings(cfg.getConfigurationSection("tnt-hologram"));
         Messages messages = new Messages(cfg.getConfigurationSection("messages"));
+        StatsBookSettings statsBook = new StatsBookSettings(cfg.getConfigurationSection("stats-book"));
 
         String pattern = cfg.getString("game.economy.currency-format", "#,###.##");
         DecimalFormat money = new DecimalFormat(pattern, DecimalFormatSymbols.getInstance(Locale.US));
-        return new CrashConfig(game, holo, tnt, messages, money);
+        return new CrashConfig(game, holo, tnt, messages, statsBook, money);
     }
 
     public GameSettings game() {
@@ -60,6 +64,10 @@ public class CrashConfig {
 
     public Messages messages() {
         return messages;
+    }
+
+    public StatsBookSettings statsBook() {
+        return statsBook;
     }
 
     public DecimalFormat moneyFormat() {
@@ -79,6 +87,9 @@ public class CrashConfig {
         private final double maxBet;
         private final boolean allowLateJoin;
         private final boolean economyEnabled;
+        private final long actionRateLimitMs;
+        private final int crashHistorySize;
+        private final int lastGamesDisplayCount;
 
         public GameSettings(ConfigurationSection section) {
             this.intervalMillis = section.getLong("interval-seconds", 30) * 1000L;
@@ -88,11 +99,14 @@ public class CrashConfig {
             this.growthPerSecond = section.getDouble("growth-per-second", 0.08);
             this.crashVariance = section.getDouble("crash-variance", 1.6);
             this.minCrashMultiplier = section.getDouble("min-crash-multiplier", 1.01);
-            this.maxCrashMultiplier = section.getDouble("max-crash-multiplier", 100.0);
+            this.maxCrashMultiplier = section.getDouble("max-crash-multiplier", 1000.0);
             this.minBet = section.getDouble("min-bet", 10.0);
-            this.maxBet = section.getDouble("max-bet", 5_000_000.0);
+            this.maxBet = section.getDouble("max-bet", 20_000_000.0);
             this.allowLateJoin = section.getBoolean("allow-late-join", false);
             this.economyEnabled = section.getBoolean("economy.enabled", true);
+            this.actionRateLimitMs = section.getLong("action-rate-limit-ms", 200L);
+            this.crashHistorySize = section.getInt("crash-history-size", 20);
+            this.lastGamesDisplayCount = section.getInt("lastgames-display-count", 5);
         }
 
         public long getIntervalMillis() {
@@ -142,6 +156,18 @@ public class CrashConfig {
         public boolean isEconomyEnabled() {
             return economyEnabled;
         }
+
+        public long getActionRateLimitMs() {
+            return actionRateLimitMs;
+        }
+
+        public int getCrashHistorySize() {
+            return crashHistorySize;
+        }
+
+        public int getLastGamesDisplayCount() {
+            return lastGamesDisplayCount;
+        }
     }
 
     public static class HologramSettings {
@@ -151,6 +177,7 @@ public class CrashConfig {
         private final double y;
         private final double z;
         private final double lineSpacing;
+        private final float yaw;
         private final List<String> lines;
         private final int chartWidth;
         private final int chartHeight;
@@ -165,14 +192,15 @@ public class CrashConfig {
             this.x = section.getDouble("x", 0.0);
             this.y = section.getDouble("y", 0.0);
             this.z = section.getDouble("z", 0.0);
+            this.yaw = (float) section.getDouble("yaw", 0.0);
             this.lineSpacing = section.getDouble("line-spacing", 0.28);
             this.lines = new ArrayList<>(section.getStringList("lines"));
             ConfigurationSection chart = section.getConfigurationSection("chart");
             this.chartWidth = chart != null ? chart.getInt("width", 30) : 30;
             this.chartHeight = chart != null ? chart.getInt("height", 8) : 8;
             this.chartMaxMultiplier = chart != null ? chart.getDouble("max-multiplier", 20.0) : 20.0;
-            this.chartSymbol = chart != null ? chart.getString("symbol", "|") : "|";
-            this.chartEmptySymbol = chart != null ? chart.getString("empty-symbol", ".") : ".";
+            this.chartSymbol = chart != null ? chart.getString("symbol", "/") : "/";
+            this.chartEmptySymbol = chart != null ? chart.getString("empty-symbol", " ") : " ";
             this.chartCurveStrength = chart != null ? chart.getDouble("curve-strength", 2.0) : 2.0;
         }
 
@@ -184,7 +212,7 @@ public class CrashConfig {
             if (world == null || world.isEmpty()) {
                 return null;
             }
-            return new Location(Bukkit.getWorld(world), x, y, z);
+            return new Location(Bukkit.getWorld(world), x, y, z, yaw, 0f);
         }
 
         public void saveLocation(JavaPlugin plugin, Location loc) {
@@ -193,11 +221,16 @@ public class CrashConfig {
             cfg.set("hologram.x", loc.getX());
             cfg.set("hologram.y", loc.getY());
             cfg.set("hologram.z", loc.getZ());
+            cfg.set("hologram.yaw", loc.getYaw());
             plugin.saveConfig();
         }
 
         public double getLineSpacing() {
             return lineSpacing;
+        }
+
+        public float getYaw() {
+            return yaw;
         }
 
         public List<String> getLines() {
@@ -258,6 +291,36 @@ public class CrashConfig {
 
         public String getText() {
             return text;
+        }
+    }
+
+    public static class StatsBookSettings {
+        private final Material material;
+        private final String name;
+        private final List<String> lore;
+        private final boolean glow;
+
+        public StatsBookSettings(ConfigurationSection section) {
+            this.material = Material.matchMaterial(section != null ? section.getString("material", "WRITABLE_BOOK") : "WRITABLE_BOOK");
+            this.name = section != null ? section.getString("name", "&fStats") : "&fStats";
+            this.lore = section != null ? new ArrayList<>(section.getStringList("lore")) : new ArrayList<>();
+            this.glow = section != null && section.getBoolean("glow", true);
+        }
+
+        public Material getMaterial() {
+            return material != null ? material : Material.WRITABLE_BOOK;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public List<String> getLore() {
+            return lore;
+        }
+
+        public boolean isGlow() {
+            return glow;
         }
     }
 

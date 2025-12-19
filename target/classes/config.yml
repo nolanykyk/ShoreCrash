@@ -1,76 +1,104 @@
 # ShoreCrash configuration
 
 game:
-  interval-seconds: 30            # How often a new round starts
-  start-delay-seconds: 5          # Delay between crash and next waiting period starting
-  tick-interval-ticks: 2          # How often the multiplier updates
-  start-multiplier: 1.0           # Multiplier at round start
-  growth-per-second: 0.08         # Base growth rate applied exponentially per second
-  crash-variance: 1.6             # Higher values allow higher random crash points
-  min-crash-multiplier: 1.01      # Minimum possible crash multiplier
-  max-crash-multiplier: 100.0     # Hard cap on crash multiplier
+  interval-seconds: 30 # How often a new round starts
+  start-delay-seconds: 5 # Delay between crash and next waiting period starting
+  tick-interval-ticks: 2 # How often the multiplier updates
+  start-multiplier: 1.0 # Multiplier at round start
+  growth-per-second: 0.08 # Base growth rate applied exponentially per second
+  crash-variance: 1.6 # Higher values allow higher random crash points
+  min-crash-multiplier: 1.01 # Minimum possible crash multiplier
+  max-crash-multiplier: 1000.0 # Hard cap on crash multiplier
   min-bet: 10.0
-  max-bet: 5000000.0
-  allow-late-join: false          # If true, players can join during running round until crash threshold crosses their bet multiplier
+  max-bet: 20000000.0
+  allow-late-join: false # If true, players can join during running round until crash threshold crosses their bet multiplier
+  action-rate-limit-ms: 200 # Minimum delay between player actions like bet/cancel/cashout
+  crash-history-size: 20 # How many past crash multipliers to persist
+  lastgames-display-count: 5 # How many past crashes to show in /crash lastgames
   economy:
-    enabled: true                 # Requires Vault + economy plugin
-    currency-format: "#,###.##"
+    enabled: true # Requires Vault + economy plugin
+    currency-format: '#,###.##'
 
 hologram:
   enabled: true
-  world: ""                       # Auto set with /crashholo set
-  x: 0.0
-  y: 0.0
-  z: 0.0
+  world: world # Auto set with /crashholo set
+  x: -31.148357646341346
+  y: 77.61813811185147
+  z: 34.34444448975359
   line-spacing: 0.28
   chart:
     width: 30
     height: 8
-    symbol: "/"                 # Line character used for the sloped graph
-    empty-symbol: " "            # Use spaces so the line appears continuous (not dotted)
-    curve-strength: 2.0          # Higher -> more exponential tilt; 0 uses linear mapping
-    max-multiplier: 20.0         # Chart clamps at this multiplier
+    symbol: / # Line character used for the sloped graph
+    empty-symbol: ' ' # Use spaces so the line appears continuous (not dotted)
+    curve-strength: 2.0 # Higher -> more exponential tilt; 0 uses linear mapping
+    max-multiplier: 20.0 # Chart clamps at this multiplier
   lines:
-    - "&a&lCRASH"
-    - "&7Status: &f{state}"
-    - "&7Next round in &a{timer}s"
-    - "&7Multiplier: &a{multiplier}x"
-    - "&7Pot: &f{pot}"
-    - "&7Players: &f{players}"
-    - "&c{chart}"
+    - '&a&lCRASH'
+    - '&7Status: &f{state}'
+    - '&7Next round in &a{timer}s'
+    - '&7Multiplier: &a{multiplier}x'
+    - '&7Pot: &f{pot}'
+    - '&7Total players: &f{players_total}'
+    - '&7Players: &f{players}'
+    - '&c{chart}'
 
 tnt-hologram:
   enabled: true
   lifespan-seconds: 8
-  text: "&cBOOM at &f{multiplier}x"
+  text: '&cBOOM at &f{multiplier}x'
+
+stats-book:
+  material: WRITABLE_BOOK
+  name: '&8%player%''s Statistics'
+  lore:
+    - '&8Player Performance'
+    - ''
+    - '&#55FFFFInformation:'
+    - '&fComplete roulette statistics'
+    - '&ffor %player%''s gameplay history'
+    - ''
+    - '&#55FFFFGame Statistics:'
+    - '&#7DFFA8> &fWins: &#7DFFA8%wins%'
+    - '&#FF0048> &fLosses: &#FF0048%losses%'
+    - '&#91C6FF> &fTotal Games: &#91C6FF%total_games%'
+    - '&#FFC242> &fWin Rate: &#FFC242%win_rate%'
+    - ''
+    - '&#55FFFFEconomy Statistics:'
+    - '&#7DFFA8> &fNet Profit: &#7DFFA8$%net%'
+    - '&#7DFFA8> &fTotal Profit: &#7DFFA8$%profit%'
+    - '&#FF0048> &fTotal Loss: &#FF0048-$%loss%'
+    - '&#FFC242> &fTotal Wagered: &#FFC242$%total_bet%'
+    - '&#91C6FF> &fTotal Winnings: &#91C6FF$%total_won%'
+  glow: true
 
 messages:
-  prefix: "&#7DFFA8&lCRASH &8▶ &r"
-  reloaded: "%prefix%&7Config reloaded."
-  no-permission: "%prefix%&7You do not have permission."
-  only-players: "%prefix%&7Only players can use this command."
-  usage-crash: "%prefix%&7Usage: /{label} <amount>"
-  usage-holo: "%prefix%&7Usage: /{label} set|clear"
-  invalid-amount: "%prefix%&7Invalid amount: &c{input}&7."
-  rig-set: "%prefix%&aNext round rigged to &a{multiplier}x."
-  rig-too-late: "%prefix%&cYou can only rig before the round starts."
-  rig-too-low: "%prefix%&cRig multiplier must be at least &c{min}x."
-  bet-placed: "%prefix%&7Entered with &a{amount}&7."
-  bet-updated: "%prefix%&7Bet updated to &a{amount}&7."
-  bet-cancelled: "%prefix%&7Bet of &c{amount}&7 cancelled and refunded."
-  bet-too-low: "%prefix%&7Minimum bet is &c{min}&7."
-  bet-too-high: "%prefix%&7Maximum bet is &c{max}&7."
-  not-waiting: "%prefix%&7You can only join before the round starts."
-  not-running: "%prefix%&7No round is running."
-  already-in: "%prefix%&7You already joined this round."
-  no-bet: "%prefix%&7You are not in this round."
-  cashout-success: "%prefix%&7You cashed out &a{payout}&7 at &a{multiplier}x&7."
-  loss: "%prefix%&7You lost &c{amount}&7 at &c{multiplier}x&7."
-  crashed: "%prefix%&cCRASHED at {multiplier}x!"
-  start: "%prefix%&aNew round starting in {timer}s."
-  begin: "%prefix%&aMultiplier live!"
-  insufficient-funds: "%prefix%&7You cannot afford that bet."
-  vault-missing: "%prefix%&7Vault or an economy plugin is missing. Economy mode disabled."
-  holo-set: "%prefix%&7Hologram location saved."
-  holo-cleared: "%prefix%&7Hologram removed."
-  no-holo: "%prefix%&7No hologram is configured."
+  prefix: '&#7DFFA8&lCRASH &8▶ &r'
+  reloaded: '%prefix%&7Config reloaded.'
+  no-permission: '%prefix%&7You do not have permission.'
+  only-players: '%prefix%&7Only players can use this command.'
+  usage-crash: '%prefix%&7Usage: /{label} <amount|cashout|cancel|stats [player]>'
+  usage-holo: '%prefix%&7Usage: /{label} set|clear'
+  invalid-amount: '%prefix%&7Invalid amount: &c{input}&7.'
+  rig-set: '%prefix%&aNext round rigged to &a{multiplier}x.'
+  rig-too-late: '%prefix%&cYou can only rig before the round starts.'
+  rig-too-low: '%prefix%&cRig multiplier must be at least &c{min}x.'
+  bet-placed: '%prefix%&7Entered with &a{amount}&7.'
+  bet-updated: '%prefix%&7Bet updated to &a{amount}&7.'
+  bet-cancelled: '%prefix%&7Bet of &c{amount}&7 cancelled and refunded.'
+  bet-too-low: '%prefix%&7Minimum bet is &c{min}&7.'
+  bet-too-high: '%prefix%&7Maximum bet is &c{max}&7.'
+  not-waiting: '%prefix%&7You can only join before the round starts.'
+  not-running: '%prefix%&7No round is running.'
+  already-in: '%prefix%&7You already joined this round.'
+  no-bet: '%prefix%&7You are not in this round.'
+  cashout-success: '%prefix%&7You cashed out &a{payout}&7 at &a{multiplier}x&7.'
+  loss: '%prefix%&7You lost &c{amount}&7 at &c{multiplier}x&7.'
+  crashed: '%prefix%&cCRASHED at {multiplier}x!'
+  start: '%prefix%&aNew round starting in {timer}s.'
+  begin: '%prefix%&aMultiplier live!'
+  insufficient-funds: '%prefix%&7You cannot afford that bet.'
+  vault-missing: '%prefix%&7Vault or an economy plugin is missing. Economy mode disabled.'
+  holo-set: '%prefix%&7Hologram location saved.'
+  holo-cleared: '%prefix%&7Hologram removed.'
+  no-holo: '%prefix%&7No hologram is configured.'
